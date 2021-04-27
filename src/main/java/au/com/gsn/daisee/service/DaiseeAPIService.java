@@ -1,28 +1,19 @@
 package au.com.gsn.daisee.service;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.net.URISyntaxException;
+import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLConnection;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Date;
 
 import javax.json.Json;
 import javax.json.JsonArrayBuilder;
 import javax.json.JsonObject;
 import javax.json.JsonObjectBuilder;
-import javax.json.spi.JsonProvider;
 
+import org.apache.commons.io.FileUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
-import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -31,10 +22,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
 import au.com.gsn.daisee.model.TokenResponse;
 import au.com.gsn.daisee.model.UploadRecordingResponse;
+import au.com.gsn.recording.vo.DaiseeRecording;
+import au.com.gsn.recording.vo.DaiseeRecordingList;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
@@ -44,109 +38,102 @@ public class DaiseeAPIService {
 	@Value("${daisee.api.url}")
 	private String daiseeUrl;
 
-	@Value("${token.api.clientId}")
-	private String clientId;
-
-	@Value("${token.api.clientSecret}")
-	private String clientSecret;
-
-	@Value("${token.api.grantType}")
-	private String grantType;
-
-	@Value("${token.api.url}")
-	private String tokenUrl;
+	@Autowired
+	private SecurityService securityService;
 
 	@Autowired
 	private RestTemplate restTemplate;
 
-	public UploadRecordingResponse uploadRecording() {
-		UploadRecordingResponse response = null;
+	public void uploadRecording() {
+
 		try {
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-			headers.setBearerAuth(getOAuthToken());
+			headers.setBearerAuth(securityService.getOAuthToken());
 
-			String metaData = getJson().toString();
+			DaiseeRecordingList recordings = getRecordingsFromAPI();
+			int total = 10;
+			int count = 0;
+			for (DaiseeRecording rec : recordings.getRecordings()) {
+				doUpload(rec, headers);
+				count++;
+				if (count == total) {
+					break;
+				}
+			}
+		} catch (Exception e) {
+			log.error("Failed");
+		}
+	}
+
+	private void doUpload(DaiseeRecording rec, HttpHeaders headers) {
+		try {
+			String metaData = getJson(rec);
+			Resource file = getFile(rec);
+			if (StringUtils.isEmpty(metaData) || file == null) {
+				return;
+			}
 			MultiValueMap<String, Object> map = new LinkedMultiValueMap<>();
-			map.add("files", getFile());
+			map.add("files", file);
 			map.add("metadata", metaData);
-
 			HttpEntity<MultiValueMap<String, Object>> body = new HttpEntity<>(map, headers);
 
 			ResponseEntity<UploadRecordingResponse> result = restTemplate.postForEntity(daiseeUrl, body,
 					UploadRecordingResponse.class);
-
-			System.out.println("result==" + result);
-
+			UploadRecordingResponse response = result.getBody();
+			log.info(String.format("Successful upload file [%s]", response.getCallId()));
 		} catch (Exception e) {
-			log.error("Failed");
+			log.error(String.format("Failed to upload file [%s] due to [%s]", rec.getRecordingId(), e.getMessage()));
 		}
-		return response;
 	}
 
-	public static Resource getFile() {
+	public static Resource getFile(DaiseeRecording rec) {
 		try {
-			String recordingUrl = "http://webdav.racq.gsn.cloud/01VNIFGJ2K885154180FE2LAES00002Q_2021-04-23_05-24-00-057A0208-1000831A-00000001.mp3";
-			URL url = new URL(recordingUrl);
-			//File file = Paths.get(url.toURI()).toFile();
-			
-			URLConnection conn = url.openConnection();
-			OutputStream outputStream = conn.getOutputStream();
-			
-			/*
-			 * File file = new File(
-			 * "C:\\temp\\failed-recordings\\00OES8LORKF35BTF190FE2LAES0005K4_2020-01-31_02-39-30-029D01E3-1046226E-00000002.wav"
-			 * );
-			 */
-		
-			return new FileSystemResource(outputStream.get);
+			File copied = new File("C:\\temp\\daisee\\" + rec.getMediaId());
+
+			String fileURL = rec.getPath();
+			URL url = new URL(fileURL);
+			HttpURLConnection httpConn = (HttpURLConnection) url.openConnection();
+			FileUtils.copyURLToFile(url, copied);
+
+			return new FileSystemResource(copied);
+
 		} catch (Exception e) {
-			log.error("Failed");
+
 		}
 		return null;
+
 	}
 
-	public String getOAuthToken() {
-
-		HttpHeaders headers = new HttpHeaders();
-		headers.setBasicAuth(clientId, clientSecret);
-
-		MultiValueMap<String, String> map = new LinkedMultiValueMap<String, String>();
-		map.add("grant_type", grantType);
-
-		HttpEntity<MultiValueMap<String, String>> body = new HttpEntity<>(map, headers);
-
-		ResponseEntity<TokenResponse> response = restTemplate.exchange(tokenUrl, HttpMethod.POST, body,
-				TokenResponse.class);
-
-		String token = response.getBody().getAccess_token();
-
-		return token;
-	}
-
-	private JsonObject getJson() {
+	private String getJson(DaiseeRecording rec) {
 		JsonObject obj = null;
 		try {
-			obj = Json.createObjectBuilder().add("direction", "outbound")
-					.add("call_start", "2017-03-01T13:00:00.007+10:00").add("length_of_whole_call", 25.3)
-					.add("agent_reference", "mikaela.jones").add("stereo_recording_agent_side", "left")
-					.add("call_reference", "bE5451826ed283fb852edb25bc32929a1").add("recordings", getRecordings())
-					.build();
+			JsonArrayBuilder recordings = Json.createArrayBuilder();
+			JsonObjectBuilder recording = Json.createObjectBuilder()
+					.add("timestamp_of_recording_start", rec.getRecordingStart())
+					.add("uploaded_filename", rec.getMediaId());
+			recordings.add(recording);
+			obj = Json.createObjectBuilder().add("direction", rec.getCallType()).add("call_start", rec.getCallStart())
+					.add("length_of_whole_call", Double.parseDouble(rec.getDuration()))
+					.add("agent_reference", rec.getAgentId()).add("stereo_recording_agent_side", "left")
+					.add("call_reference", rec.getRecordingId()).add("recordings", recordings).build();
 
 		} catch (Exception e) {
 			log.error(String.format("Failed %s", e.getMessage()));
 		}
-		return obj;
+		return obj.toString();
 	}
 
-	private JsonArrayBuilder getRecordings() {
-		JsonArrayBuilder recordings = Json.createArrayBuilder();
+	public DaiseeRecordingList getRecordingsFromAPI() {
+		String url = "http://localhost:8091/getDaiseeRecordings";
+		try {
+			DaiseeRecordingList response = restTemplate.getForObject(url, DaiseeRecordingList.class);
+			return response;
 
-		JsonObjectBuilder recording = Json.createObjectBuilder()
-				.add("timestamp_of_recording_start", "2017-03-01T13:00:27.845+10:00").add("uploaded_filename",
-						"00OES8LORKF35BTF190FE2LAES0005K4_2020-01-31_02-39-30-029D01E3-1046226E-00000002.wav");
-		recordings.add(recording);
-		return recordings;
+		} catch (Exception e) {
+			log.info("Failed to getRecordings");
+		}
+		return null;
 	}
 
 }
